@@ -1,0 +1,387 @@
+pipeline:
+  identifier: E2E_Automation
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: Cloud_Ingestion_Rec_E2E_Automation
+        repoName: https://github.com/verint-CloudREC/E2E_Automation.git
+        build: <+input>
+  stages:
+    - stage:
+        name: Build
+        identifier: Build
+        description: ""
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: CloudRecAutomation
+              namespace: hydra-harness-cicd-delegate
+              automountServiceAccountToken: true
+              nodeSelector: {}
+              os: Linux
+          execution:
+            steps:
+              - step:
+                  type: BuildAndPushDockerRegistry
+                  name: Build and Push
+                  identifier: BuildAndPushDockerRegistry_1
+                  spec:
+                    connectorRef: quayhydraverintcomcloudrecordingautomation
+                    repo: quay.hydra.verint.com/cloud-recording-automation/e2e_automation
+                    tags:
+                      - latest
+                      - <+pipeline.sequenceId>
+                    resources:
+                      limits:
+                        memory: 5G
+    - stage:
+        name: Run Tests
+        identifier: Run_Tests
+        description: ""
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: ShellScript
+                  name: CheckKafkaExecution
+                  identifier: CheckKafkaExecution
+                  spec:
+                    shell: Bash
+                    executionTarget: {}
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          API_KEY=<+pipeline.stages.Run_Tests.spec.execution.steps.CheckKafkaExecution.spec.environmentVariables.API_KEY>
+                          str=$(curl -i -X GET \
+                            'https://app.harness.io/ng/api/variables/Kafka_Execution_Count?accountIdentifier=20ZrFxKoQ8ieGARA-Z8pVg&orgIdentifier=EDM&projectIdentifier=CloudRecAutomation' \
+                            -H "x-api-key: $API_KEY")
+                          search1="\"fixedValue\":\""
+                          prefix1=${str%%$search1*}
+                          echo ${#prefix1}
+                          search2="\",\"defaultValue"
+                          prefix2=${str%%$search2*}
+                          echo ${#prefix2}
+
+                          #echo $((prefix))
+
+                          current_count=${str:${#prefix1}+14:${#prefix2}-${#prefix1}-14}
+                          #echo $current_count
+
+                          while [ $((current_count)) -ge 1 ]
+                          do
+                              sleep 30
+                              str=$(curl -i -X GET \
+                                'https://app.harness.io/ng/api/variables/Kafka_Execution_Count?accountIdentifier=20ZrFxKoQ8ieGARA-Z8pVg&orgIdentifier=EDM&projectIdentifier=CloudRecAutomation' \
+                                -H "x-api-key: $API_KEY")
+                            search1="\"fixedValue\":\""
+                            prefix1=${str%%$search1*}
+                            search2="\",\"defaultValue"
+                            prefix2=${str%%$search2*}
+                            current_count=${str:${#prefix1}+14:${#prefix2}-${#prefix1}-14}
+                          done
+                    environmentVariables:
+                      - name: API_KEY
+                        type: Secret
+                        value: Harness_API_Key
+                    outputVariables: []
+                  timeout: 2h
+              - step:
+                  type: ShellScript
+                  name: UpdateE2EExecutionCount
+                  identifier: UpdateE2EExecutionCount
+                  spec:
+                    shell: Bash
+                    executionTarget: {}
+                    source:
+                      type: Inline
+                      spec:
+                        script: |+
+                          API_KEY=<+pipeline.stages.Run_Tests.spec.execution.steps.CheckKafkaExecution.spec.environmentVariables.API_KEY>
+                          str=$(curl -i -X GET \
+                            'https://app.harness.io/ng/api/variables/E2E_Execution?accountIdentifier=20ZrFxKoQ8ieGARA-Z8pVg&orgIdentifier=EDM&projectIdentifier=CloudRecAutomation' \
+                            -H "x-api-key: $API_KEY")
+                          search1="\"fixedValue\":\""
+                          prefix1=${str%%$search1*}
+                          search2="\",\"defaultValue"
+                          prefix2=${str%%$search2*}
+
+                          current_count=${str:${#prefix1}+14:${#prefix2}-${#prefix1}-14}
+                          new_count=$((current_count+1))
+                          curl -i -X PUT 'https://app.harness.io/ng/api/variables?accountIdentifier=20ZrFxKoQ8ieGARA-Z8pVg' -H 'Content-Type: application/json' -H "x-api-key: $API_KEY" -d "{\"variable\": {\"identifier\": \"E2E_Execution\", \"name\": \"E2E_Execution_Count\", \"description\": \"E2E_Execution_Count\", \"orgIdentifier\": \"EDM\", \"projectIdentifier\": \"CloudRecAutomation\",\"type\": \"String\", \"spec\": {\"valueType\": \"FIXED\", \"fixedValue\": \"$new_count\" } }}"
+
+                    environmentVariables: []
+                    outputVariables: []
+                  timeout: 10m
+              - parallel:
+                  - step:
+                      type: Container
+                      name: Run MT Tests
+                      identifier: Run_Tests
+                      spec:
+                        connectorRef: quayhydraverintcomcloudrecordingautomation
+                        image: quay.hydra.verint.com/cloud-recording-automation/e2e_automation
+                        command: |-
+                          {
+                              cd ../automation/
+                              echo 52.54.63.228 CFE5CONF1.telab.local >> /etc/hosts 
+                              python -m pytest \
+                                      tests/APItests/test_createJWTToken_TenantA.py \
+                                      tests/SessionExpiry/test_sessionExpiryCheck.py \
+                                      tests/APItests/test_ingestValidFile_TenantA_mono_Overlap.py \
+                                      tests/APItests/test_ingestValidFile_AQS.py \
+                                      tests/APItests/test_ingestValidFile_InteractionEvents.py \
+                                      tests/APItests/test_createJWTToken_TenantB.py \
+                                      tests/APItests/test_ingestValidFile_TenantB_stereo.py \
+                                      tests/APItests/test_ingestValidFile_TenantB1_mixed.py \
+                                      tests/APItests/test_ingestValidFile_TenantB2_SilenceGap.py \
+                                      tests/APItests/test_ingestMultipleContent.py \
+                                      tests/APItests/test_ingestValidFile_Snipetting.py \
+                                      tests/APItests/test_ingestValidFile_Stitching.py \
+                                      tests/APItests/test_ingestValidFile_Uncompressed.py \
+                                      tests/APItests/test_ingestInValidFile_TenantA.py \
+                                      tests/APItests/test_validateInteractionEventTags.py \
+                                      tests/UItests/test_login_page_for_Tenant_A_and_Tenant_B.py \
+                                      tests/UItests/test_search_interaction_and_play_for_Tenant_A_and_Tenant_B.py \
+                                      tests/UItests/test_search_interaction_with_multiple_content_and_play.py \
+                                      tests/UItests/test_search_snippet_interaction_and_play.py \
+                                      tests/UItests/test_search_stitched_interaction_and_play.py \
+                                      tests/UItests/test_search_uncompressed_interaction_and_play.py \
+                                      tests/APItests/test_searchInteractionsDASAPI_TenantSafe.py \
+                                      tests/APItests/test_validateAQS.py \
+                                      --json=reports/report.json --html=reports/report.html
+                              pytest_status=$?
+                          } || {
+                            echo "MT Pytest failed" 
+                          }
+                          cd ../src
+                          python app_quality_analytics.py ./../automation/reports/report.json autobots e2e
+
+                          echo $pytest_status
+                          exit $pytest_status
+                        shell: Sh
+                        infrastructure:
+                          type: KubernetesDirect
+                          spec:
+                            connectorRef: CloudRecAutomation
+                            namespace: hydra-harness-cicd-delegate
+                            resources:
+                              limits:
+                                cpu: "2"
+                                memory: 2000Mi
+                            annotations: {}
+                            labels: {}
+                            containerSecurityContext:
+                              capabilities:
+                                drop: []
+                                add: []
+                              runAsNonRoot: false
+                            nodeSelector: {}
+                            os: Linux
+                        outputVariables: []
+                        envVariables:
+                          HOST: CFE5CONF1.telab.local
+                          INGESTOR: apigw.us-east-1.wrk-1.aws.hydra.verint.com/int
+                          MEDIA_API: apigw.us-east-1.wrk-1.aws.hydra.verint.com/int
+                          AWS_REGION: us-east-1
+                          AWS_BUCKET_NAME: edm-cloudrec-ause1-int-tenant-a-bucket
+                          TENANTID_A: c6c3cf22-bf2f-11ed-afa1-0242ac120002
+                          TENANTID_B: ec01cc45-4b64-4be7-993d-b00f6c1f10ca
+                          TENANTID_C: 49a32b7f-f5c3-4cb9-a2e7-4e92a0b5f76f
+                          IS_SSL: "True"
+                          AWS_ACCESS_KEY: <+secrets.getValue("e2e_aws_access_key_tenantA")>
+                          AWS_SECRET: <+secrets.getValue("e2e_aws_secret_tenantA")>
+                          AZURE_TENANT: 88522983-f865-4154-bd87-96cf84061b0f
+                          JWT_CLIENTID_A: <+secrets.getValue("JWT_ClientID_A")>
+                          JWT_CLIENTID_B: <+secrets.getValue("JWT_ClientID_B")>
+                          JWT_CLIENTSECRET_A: <+secrets.getValue("JWT_ClientSecret_A")>
+                          JWT_CLIENTSECRET_B: <+secrets.getValue("JWT_ClientSecret_B")>
+                          SCOPE: URN://VCPINTUK.onmicrosoft.com/edm/api/ingestion/.default
+                          TENANT_A_ADMIN: Tenant_A_Admin
+                          TENANT_B_ADMIN: Tenant_B_Admin
+                          TENANT_C_ADMIN: Tenant_C_Admin
+                          TENANT_A_ADMIN_PASSWORD: <+secrets.getValue("Tenant_A_Admin_PASSWORD")>
+                          TENANT_B_ADMIN_PASSWORD: <+secrets.getValue("Tenant_B_Admin_PASSWORD")>
+                          TENANT_C_ADMIN_PASSWORD: <+secrets.getValue("Tenant_C_Admin_PASSWORD")>
+                          HOST_MT_PASSWORD: <+secrets.getValue("HostAdmin_PASSWORD")>
+                          HOST_ST_PASSWORD: <+secrets.getValue("wsuperuser_PASSWORD")>
+                          AWS_ACCESS_KEY_ID_EXPORT_BUCKET: <+secrets.getValue("E2E_AWS_ACCESS_KEY_ID_EXPORT_BUCKET")>
+                          AWS_SECRET_ACCESS_KEY_EXPORT_BUCKET: <+secrets.getValue("E2E_AWS_SECRET_ACCESS_KEY_EXPORT_BUCKET")>
+                          AWS_EXPORT_BUCKET_NAME: ptearchive
+                        imagePullPolicy: Always
+                        reports:
+                          type: JUnit
+                          spec:
+                            paths:
+                              - /automation/report.xml
+                      timeout: 1h 30m
+                  - step:
+                      type: Container
+                      name: Run ST Tests
+                      identifier: Run_ST_Tests
+                      spec:
+                        connectorRef: quayhydraverintcomcloudrecordingautomation
+                        image: quay.hydra.verint.com/cloud-recording-automation/e2e_automation
+                        command: |
+                          {
+                            cd ../automation/
+                            echo 52.86.177.128 CFE5CONF1.telab.local >> /etc/hosts 
+                            python -m pytest \
+                                  tests/WFEIngestiontests/test_UseCloudRecordingForIngestion_false.py \
+                                  tests/Metrictests/test_getMetricStartDateTime.py \
+                                  tests/APItests/test_createJWTToken_TenantC.py \
+                                  tests/APItests/test_ingestValidFile_Retention.py \
+                                  tests/APItests/test_ingestValidFile_TenantC.py \
+                                  tests/APItests/test_ingestValidFile_TenantC02.py \
+                                  tests/APItests/test_ingestValidFile_TenantC03.py \
+                                  tests/APItests/test_ingestValidFile_TenantC04.py \
+                                  tests/APItests/test_ingestValidFile_TenantC05.py \
+                                  tests/APItests/test_ingestValidFile_TenantC06.py \
+                                  tests/APItests/test_ingestValidFile_TenantC_G711U_01.py \
+                                  tests/APItests/test_ingestValidFile_TenantC_G711U_02.py \
+                                  tests/APItests/test_ingestValidFile_TenantC_G711U_03.py \
+                                  tests/APItests/test_ingestValidFile_TenantC_G711U_04.py \
+                                  tests/APItests/test_ingestValidFile_TenantC_PCM_01.py \
+                                  tests/APItests/test_ingestValidFile_TenantC_PCM_02.py \
+                                  tests/APItests/test_ingestValidFile_TenantC_PCM_03.py \
+                                  tests/WFEIngestiontests/test_wfeingest_SingleContent_noncloud.py \
+                                  tests/WFEIngestiontests/test_wfeingest_MultipleContent_noncloud.py \
+                                  tests/UItests/test_login_page_for_Tenant_C.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C02.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C03.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C04.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C05.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C07.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C08.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C09.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C10.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C11.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C12.py \
+                                  tests/UItests/test_search_interaction_and_play_for_Tenant_C13.py \
+                                  tests/APItests/test_validateRetention.py \
+                                  tests/Metrictests/test_getMetricEndDateTime.py \
+                                  tests/Metrictests/test_validateMetric.py \
+                                  tests/APItests/test_ingestValidFile_TenantSafe_TenantC.py \
+                                  tests/WFEIngestiontests/test_wfeingest_search_interaction_play_noncloud.py \
+                                  --json=reports/report.json --html=reports/report.html
+                            pytest_status=$?
+                          } || {
+                            echo "ST Pytest failed"
+                          }
+
+                          cd ../src
+                          python app_quality_analytics.py ./../automation/reports/report.json autobots e2e
+
+                          echo $pytest_status
+                          exit $pytest_status
+                        shell: Sh
+                        infrastructure:
+                          type: KubernetesDirect
+                          spec:
+                            connectorRef: CloudRecAutomation
+                            namespace: hydra-harness-cicd-delegate
+                            resources:
+                              limits:
+                                cpu: "1"
+                                memory: 2000Mi
+                            annotations: {}
+                            labels: {}
+                            containerSecurityContext:
+                              capabilities:
+                                drop: []
+                                add: []
+                            nodeSelector: {}
+                        outputVariables: []
+                        envVariables:
+                          HOST: CFE5CONF1.telab.local
+                          INGESTOR: apigw.us-east-1.wrk-1.aws.hydra.verint.com/int
+                          MEDIA_API: apigw.us-east-1.wrk-1.aws.hydra.verint.com/int
+                          AWS_REGION: us-east-1
+                          AWS_BUCKET_NAME: edm-cloudrec-ause1-int-tenant-a-bucket
+                          TENANTID_A: c6c3cf22-bf2f-11ed-afa1-0242ac120002
+                          TENANTID_B: ec01cc45-4b64-4be7-993d-b00f6c1f10ca
+                          TENANTID_C: 49a32b7f-f5c3-4cb9-a2e7-4e92a0b5f76f
+                          IS_SSL: "True"
+                          AWS_ACCESS_KEY: <+secrets.getValue("e2e_aws_access_key_tenantA")>
+                          AWS_SECRET: <+secrets.getValue("e2e_aws_secret_tenantA")>
+                          AZURE_TENANT: 88522983-f865-4154-bd87-96cf84061b0f
+                          JWT_CLIENTID_C: <+secrets.getValue("JWT_ClientID_C")>
+                          JWT_CLIENTSECRET_C: <+secrets.getValue("JWT_ClientSecret_C")>
+                          SCOPE: URN://VCPINTUK.onmicrosoft.com/edm/api/ingestion/.default
+                          HOST_MT_PASSWORD: <+secrets.getValue("HostAdmin_PASSWORD")>
+                          HOST_ST_PASSWORD: <+secrets.getValue("wsuperuser_PASSWORD")>
+                          TENANT_A_ADMIN: Tenant_A_Admin
+                          TENANT_B_ADMIN: Tenant_B_Admin
+                          TENANT_C_ADMIN: Tenant_C_Admin
+                          TENANT_A_ADMIN_PASSWORD: <+secrets.getValue("Tenant_A_Admin_PASSWORD")>
+                          TENANT_B_ADMIN_PASSWORD: <+secrets.getValue("Tenant_B_Admin_PASSWORD")>
+                          TENANT_C_ADMIN_PASSWORD: <+secrets.getValue("Tenant_C_Admin_PASSWORD")>
+                        imagePullPolicy: Always
+                        reports:
+                          type: JUnit
+                          spec:
+                            paths: []
+                      timeout: 1h
+                      when:
+                        stageStatus: All
+              - step:
+                  type: ShellScript
+                  name: DecreaseE2EExecutionCount
+                  identifier: DecreaseE2EExecutionCount
+                  spec:
+                    shell: Bash
+                    executionTarget: {}
+                    source:
+                      type: Inline
+                      spec:
+                        script: |-
+                          API_KEY=<+pipeline.stages.Run_Tests.spec.execution.steps.CheckKafkaExecution.spec.environmentVariables.API_KEY>
+
+                          str=$(curl -i -X GET \
+                                'https://app.harness.io/ng/api/variables/E2E_Execution?accountIdentifier=20ZrFxKoQ8ieGARA-Z8pVg&orgIdentifier=EDM&projectIdentifier=CloudRecAutomation' \
+                                -H "x-api-key: $API_KEY")
+                            search1="\"fixedValue\":\""
+                            prefix1=${str%%$search1*}
+                            search2="\",\"defaultValue"
+                            prefix2=${str%%$search2*}
+                            current_count=${str:${#prefix1}+14:${#prefix2}-${#prefix1}-14}
+
+                          if [ $((current_count)) -le 0 ]
+                          then
+                              new_count=0
+                          else
+                              new_count=$((current_count-1))
+                          fi
+
+                          curl -i -X PUT 'https://app.harness.io/ng/api/variables?accountIdentifier=20ZrFxKoQ8ieGARA-Z8pVg' -H 'Content-Type: application/json' -H "x-api-key: $API_KEY" -d "{\"variable\": {\"identifier\": \"E2E_Execution\", \"name\": \"E2E_Execution_Count\", \"description\": \"E2E_Execution_Count\", \"orgIdentifier\": \"EDM\", \"projectIdentifier\": \"CloudRecAutomation\",\"type\": \"String\", \"spec\": {\"valueType\": \"FIXED\", \"fixedValue\": \"$new_count\" } }}"
+                    environmentVariables: []
+                    outputVariables: []
+                  timeout: 10m
+                  when:
+                    stageStatus: All
+        tags: {}
+        delegateSelectors:
+          - hydra-cicd-01-delegate
+  allowStageExecutions: true
+  projectIdentifier: CloudRecAutomation
+  orgIdentifier: EDM
+  name: E2E_Automation
+  notificationRules:
+    - name: Cloud-Rec-Automation-Pipelines-MS-Teams
+      identifier: CloudRecAutomationPipelinesMSTeams
+      pipelineEvents:
+        - type: PipelineSuccess
+        - type: PipelineFailed
+      notificationMethod:
+        type: MsTeams
+        spec:
+          userGroups: []
+          msTeamKeys:
+            - https://verint.webhook.office.com/webhookb2/3432707a-ffed-44de-8bac-33ff8006e354@bb2ed304-4099-49cf-b081-cbb7a3a580ca/IncomingWebhook/88f1fb6ba2a14164ba8daec01fa8c2cb/6fcb4a93-19aa-4780-93d0-439fecdf772d
+      enabled: true
