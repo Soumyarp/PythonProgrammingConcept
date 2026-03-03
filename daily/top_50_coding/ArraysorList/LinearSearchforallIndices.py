@@ -12,5 +12,5 @@ def linearSearch(arr, target):
 
 
 arr=[55,4,43,2,2,2,1,65,5,7,2,1,88,9]
-target = 100
+target = 65
 print(linearSearch(arr, target))
